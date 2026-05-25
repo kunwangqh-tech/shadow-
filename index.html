@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shadow Commander 人工成交同步</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #101418;
+      color: #f4f7fb;
+    }
+    body {
+      margin: 0;
+      padding: 18px;
+      background: linear-gradient(180deg, #101418, #1d2530);
+    }
+    main {
+      max-width: 560px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 22px;
+      margin: 0 0 8px;
+    }
+    .card {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 16px;
+      padding: 16px;
+      margin: 14px 0;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.24);
+    }
+    label {
+      display: block;
+      margin: 14px 0 6px;
+      font-weight: 700;
+    }
+    input, select, textarea, button {
+      box-sizing: border-box;
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      padding: 12px;
+      font-size: 17px;
+    }
+    input, select, textarea {
+      background: rgba(255, 255, 255, 0.96);
+      color: #121820;
+    }
+    textarea {
+      min-height: 74px;
+      resize: vertical;
+    }
+    button {
+      border: 0;
+      color: white;
+      font-weight: 800;
+      margin-top: 12px;
+    }
+    .dry {
+      background: #2563eb;
+    }
+    .real {
+      background: #dc2626;
+    }
+    .muted {
+      color: #b8c2d1;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .status {
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      background: rgba(0, 0, 0, 0.26);
+      border-radius: 12px;
+      padding: 12px;
+      min-height: 70px;
+    }
+    .danger {
+      color: #fecaca;
+      font-weight: 800;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Shadow Commander 人工成交同步</h1>
+    <p class="muted">只同步已经在券商 App 真实成交的事实；不会触发自动交易。真正入账以主系统“买入确认/卖出确认”回执为准。</p>
+
+    <section class="card">
+      <div class="muted">
+        ntfy: <span id="serverText"></span> / topic 后 8 位: <span id="topicTail"></span><br>
+        token 后 8 位: <span id="tokenTail"></span>
+      </div>
+
+      <label for="action">动作</label>
+      <select id="action">
+        <option value="BUY">买入</option>
+        <option value="BUY">加仓</option>
+        <option value="SELL">卖出</option>
+        <option value="SELL">减仓</option>
+      </select>
+
+      <label for="code">股票代码</label>
+      <input id="code" inputmode="numeric" pattern="[0-9]{6}" placeholder="例如 000001" maxlength="6">
+
+      <label for="name">股票名称（可选）</label>
+      <input id="name" placeholder="例如 平安银行">
+
+      <label for="price">成交价</label>
+      <input id="price" inputmode="decimal" placeholder="例如 12.34">
+
+      <label for="quantity">成交数量</label>
+      <input id="quantity" inputmode="numeric" placeholder="例如 1000">
+
+      <label for="note">备注（可选）</label>
+      <textarea id="note" placeholder="例如 OPPO 手工同步"></textarea>
+
+      <button class="dry" id="dryRunButton" type="button">测试提交 dry-run</button>
+      <button class="real" id="realButton" type="button">真实提交</button>
+      <p class="muted"><span class="danger">真实提交</span>会进入 Shadow Commander remote command 队列，并由主系统更新持仓和账本。</p>
+    </section>
+
+    <section class="card">
+      <strong>提交状态</strong>
+      <div id="status" class="status">尚未提交。</div>
+    </section>
+  </main>
+
+  <script>
+    const CONFIG = {
+      NTFY_SERVER: "https://ntfy.sh",
+      MANUAL_TRADE_NTFY_TOPIC: "shadow-manual-trade-5Z8Saee6urAsqvvT6yJOiDzkAJdkv1Qt",
+      MANUAL_TRADE_TOKEN: "manual_trade_token_xCVJUvYzoos065ByZleUMPrn8yBiQSGd0a3wPg4fg",
+      TOPIC_TAIL: "AJdkv1Qt",
+      TOKEN_TAIL: "a3wPg4fg"
+    };
+
+    const els = {
+      serverText: document.getElementById("serverText"),
+      topicTail: document.getElementById("topicTail"),
+      tokenTail: document.getElementById("tokenTail"),
+      action: document.getElementById("action"),
+      code: document.getElementById("code"),
+      name: document.getElementById("name"),
+      price: document.getElementById("price"),
+      quantity: document.getElementById("quantity"),
+      note: document.getElementById("note"),
+      status: document.getElementById("status"),
+      dryRunButton: document.getElementById("dryRunButton"),
+      realButton: document.getElementById("realButton")
+    };
+
+    els.serverText.textContent = CONFIG.NTFY_SERVER;
+    els.topicTail.textContent = CONFIG.TOPIC_TAIL;
+    els.tokenTail.textContent = CONFIG.TOKEN_TAIL;
+
+    function setStatus(text) {
+      els.status.textContent = text;
+    }
+
+    function readPayload(dryRun) {
+      const code = els.code.value.trim();
+      const price = els.price.value.trim();
+      const quantity = els.quantity.value.trim();
+      const note = els.note.value.trim();
+
+      if (!/^\d{6}$/.test(code)) {
+        throw new Error("股票代码必须是 6 位数字。");
+      }
+      const priceNumber = Number(price);
+      if (!Number.isFinite(priceNumber) || priceNumber <= 0) {
+        throw new Error("成交价必须是大于 0 的数字。");
+      }
+      if (!/^\d+$/.test(quantity) || Number(quantity) <= 0) {
+        throw new Error("成交数量必须是正整数。");
+      }
+
+      return {
+        type: "manual_trade",
+        token: CONFIG.MANUAL_TRADE_TOKEN,
+        action: els.action.value,
+        code,
+        name: els.name.value.trim(),
+        price: price,
+        quantity: quantity,
+        note,
+        dry_run: dryRun
+      };
+    }
+
+    async function submitTrade(dryRun) {
+      try {
+        const payload = readPayload(dryRun);
+        if (!dryRun) {
+          const ok = window.confirm("这将写入 Shadow Commander 持仓和账本，确认已在券商 App 真实成交？");
+          if (!ok) {
+            setStatus("已取消真实提交。");
+            return;
+          }
+        }
+        const url = `${CONFIG.NTFY_SERVER.replace(/\/+$/, "")}/${encodeURIComponent(CONFIG.MANUAL_TRADE_NTFY_TOPIC)}`;
+        setStatus(`提交中...\n模式: ${dryRun ? "dry-run 测试" : "真实提交"}\n${JSON.stringify(payload, null, 2)}`);
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Title": "Shadow Commander Manual Trade",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+        const text = await response.text();
+        setStatus(
+          `ntfy HTTP ${response.status} ${response.statusText}\n` +
+          `响应: ${text.slice(0, 500)}\n\n` +
+          "注意：真正账本更新以 Shadow Commander 后续“买入确认/卖出确认”回执为准。"
+        );
+      } catch (error) {
+        setStatus(`提交失败: ${error.message || error}`);
+      }
+    }
+
+    els.dryRunButton.addEventListener("click", () => submitTrade(true));
+    els.realButton.addEventListener("click", () => submitTrade(false));
+  </script>
+</body>
+</html>
